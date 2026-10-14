@@ -4,6 +4,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from torch.utils.data import DataLoader, TensorDataset
+
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 
@@ -669,3 +671,146 @@ def evaluate_model(
         predictions,
         targets
     )
+
+# 12. run_experiment
+
+def run_experiment(
+    model_name,
+    period,
+    lookback,
+    horizon,
+    trend_slope=0.0,
+    noise_std=0.0,
+    series_length=5000,
+    kernel_size=5,
+    epochs=50,
+    learning_rate=1e-3,
+    seed=42
+):
+    set_seed(seed)
+
+    _, series, _, _, _ = generate_series(
+        length=series_length,
+        period=period,
+        trend_slope=trend_slope,
+        noise_std=noise_std
+    )
+
+    train_loader, val_loader, test_loader = prepare_data(
+        series,
+        lookback=lookback,
+        horizon=horizon
+    )
+
+    model_classes = {
+        "Linear": Linear,
+        "DLinear": DLinear,
+        "NLinear": NLinear
+    }
+
+    if model_name not in model_classes:
+        raise ValueError(f"Unknown model: {model_name}")
+
+    if model_name == "DLinear":
+        model = DLinear(
+            lookback=lookback,
+            horizon=horizon,
+            kernel_size=kernel_size
+        )
+    else:
+        model = model_classes[model_name](
+            lookback=lookback,
+            horizon=horizon
+        )
+
+    train_losses, val_losses = train_model(
+        model,
+        train_loader,
+        val_loader,
+        epochs=epochs,
+        learning_rate=learning_rate
+    )
+
+    test_mse = evaluate_model(
+        model,
+        test_loader
+    )
+
+    return {
+        "Model": model_name,
+        "Period": period,
+        "Lookback": lookback,
+        "Horizon": horizon,
+        "L/P": lookback / period,
+        "T/P": horizon / period,
+        "Trend": trend_slope,
+        "Noise": noise_std,
+        "Seed": seed,
+        "MSE": test_mse
+    }
+
+
+# 13. Data preparation
+def prepare_data(
+    series,
+    lookback,
+    horizon,
+    batch_size=32,
+    train_ratio=0.7,
+    val_ratio=0.15
+):
+    series = np.asarray(series, dtype=np.float32).reshape(-1)
+
+    n = len(series)
+    train_end = int(n * train_ratio)
+    val_end = int(n * (train_ratio + val_ratio))
+
+    if lookback < 1 or horizon < 1:
+        raise ValueError("lookback and horizon must be positive")
+
+    if not (0 < train_ratio < 1 and
+            0 < val_ratio < 1 and
+            train_ratio + val_ratio < 1):
+        raise ValueError("Invalid train/validation ratios")
+
+    def make_loader(start, end, shuffle=False):
+        X, y = [], []
+
+        for target_start in range(start, end - horizon + 1):
+            input_start = target_start - lookback
+
+            if input_start < 0:
+                continue
+
+            X.append(series[input_start:target_start])
+            y.append(series[target_start:target_start + horizon])
+
+        if not X:
+            raise ValueError(
+                "Not enough data for the selected lookback and horizon"
+            )
+
+        X = torch.tensor(np.stack(X), dtype=torch.float32)
+        y = torch.tensor(np.stack(y), dtype=torch.float32)
+
+        dataset = TensorDataset(X, y)
+
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=shuffle
+        )
+
+    train_loader = make_loader(
+        lookback, train_end, shuffle=True
+    )
+
+    val_loader = make_loader(
+        train_end, val_end
+    )
+
+    test_loader = make_loader(
+        val_end, n
+    )
+
+    return train_loader, val_loader, test_loader
